@@ -2,6 +2,7 @@ package bigquery
 
 import (
 	"context"
+	"strconv"
 	"strings"
 
 	"cloud.google.com/go/bigquery"
@@ -39,6 +40,13 @@ func (bq *BigQueryModule) CreateTableClustered(ctx context.Context, datasetID, t
 		return err
 	}
 	return nil
+}
+
+func SplitTableIdentifier(tableIdentifier string) (identifier int, tableName string) {
+	identifierSplit := strings.Split(tableIdentifier, ". ")
+	identifier, _ = strconv.Atoi(identifierSplit[0])
+
+	return identifier, identifierSplit[1]
 }
 
 func SplitTableName(tableName string) (projectID, datasetID, tableID string) {

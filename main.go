@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"cloud.google.com/go/bigquery"
 	bqutil "github.com/danielchristian-tokped/bigquery-cluster/bigquery"
+	"github.com/danielchristian-tokped/bigquery-cluster/constant"
+	sheetutil "github.com/danielchristian-tokped/bigquery-cluster/sheet"
 	"github.com/tokopedia/tdk/go/log"
 	"github.com/tokopedia/tdk/go/log/logger"
 )
@@ -28,13 +31,8 @@ type GoogleOAuth struct {
 	ClientX509CertURL       string `json:"client_x509_cert_url"`
 }
 
-const CLUSTER_ENV = "CLUSTERENV"
-const credentialPath = "/credentials/"
-const PrefixFileSA = "clustering-service-account"
-
 var spreadsheetID = "1ROdcDV71who85wabn5fIV6K8ZjdinbhBOqyWzI25GjI"
-var worksheet = "Sheet1"
-var sheetrange = ""
+var sheetrange = "B14:H28"
 
 var MapTableIDCluster = map[string][]string{}
 var ProjectIDCache = map[string]*bigquery.Client{}
@@ -42,7 +40,8 @@ var BQModule *bqutil.BigQueryModule
 
 func main() {
 
-	initiateLog()
+	clusterEnv := getEnvironment()
+	initiateLog(clusterEnv)
 
 	var err error
 
@@ -50,18 +49,51 @@ func main() {
 	ctx := context.Background()
 
 	googleAuthCfg := GoogleOAuth{}
-	getConfigFile(&googleAuthCfg)
+	getConfigFile(&googleAuthCfg, clusterEnv)
 
 	serviceAccount, err := json.Marshal(googleAuthCfg)
 	if err != nil {
 		fmt.Println("Service account marshall error:", err)
 		log.Errorf("Service account marshall error:", err)
+		return
 	}
 
 	// Get Project ID, Dataset ID, TableID from Sheet
+	SheetModule := sheetutil.New(ctx, &sheetutil.SheetModule{
+		SheetAuth: serviceAccount,
+	})
 
-	for tableName, clusterColumn := range MapTableIDCluster {
+	rangeData := fmt.Sprintf("%s!%s", constant.WorksheetID, sheetrange)
+	resp, err := SheetModule.RetrieveDataFromSheet(ctx, spreadsheetID, rangeData)
+	if err != nil {
+		log.Printf("Unable to retrieve data from sheet: %v\n", err)
+		log.Errorf("Unable to retrieve data from sheet: %v\n", err)
+		return
+	}
 
+	for id, row := range resp.Values {
+		clustered, _ := strconv.ParseBool(row[6].(string))
+		if clustered {
+			continue
+		}
+
+		tableIdentifier := fmt.Sprintf("%s. %s", strconv.Itoa(id), row[0])
+
+		MapTableIDCluster[tableIdentifier] = make([]string, 0, 4)
+
+		for colNo := 1; colNo < 5; colNo++ {
+			if row[colNo].(string) != constant.NONE {
+				MapTableIDCluster[tableIdentifier] = append(MapTableIDCluster[tableIdentifier], row[colNo].(string))
+			}
+		}
+	}
+
+	// If our range is B12:C28, get only the 12
+	startRow, _ := strconv.Atoi(strings.Split(sheetrange, ":")[0][1:])
+
+	for tableIdentifier, clusterColumn := range MapTableIDCluster {
+
+		identifier, tableName := bqutil.SplitTableIdentifier(tableIdentifier)
 		projectID, datasetID, tableID := bqutil.SplitTableName(tableName)
 
 		if bqClient, cached := ProjectIDCache[projectID]; !cached {
@@ -99,9 +131,15 @@ func main() {
 			fmt.Printf("%s.%s.%s column %v has been clustered at %s. Clustering was done for %dms\n", projectID, datasetID, tableID, strings.Join(clusterColumn[:], ", "), timeEnd, timeExecution)
 		}
 
-		if prevProjectID != projectID {
-			prevProjectID = projectID
+		currentRow := strconv.Itoa(startRow + identifier)
+
+		_, err := SheetModule.UpdateCellValue(ctx, spreadsheetID, currentRow, err.Error())
+		if err != nil {
+			fmt.Printf("Error Updating on row %s:\n%#v\n", currentRow, err)
+			log.Errorf("Error Updating on row %s:\n%#v\n", currentRow, err)
 		}
+
+		prevProjectID = projectID
 
 	}
 
@@ -109,11 +147,17 @@ func main() {
 
 }
 
-func initiateLog() {
+func initiateLog(clusterEnv string) {
+	var fatalLogFile, errorLogFile, infoLogFile string
+
+	fatalLogFile = fmt.Sprintf("%s.%s.%s", constant.LogPath, clusterEnv, constant.FatalLogName)
+	errorLogFile = fmt.Sprintf("%s.%s.%s", constant.LogPath, clusterEnv, constant.ErrorLogName)
+	infoLogFile = fmt.Sprintf("%s.%s.%s", constant.LogPath, clusterEnv, constant.InfoLogName)
+
 	errFatalLogger, err := log.NewLogger(log.Zerolog, &logger.Config{
 		AppName:  "Simple App BigQuery Clustering",
 		Level:    log.FatalLevel, // please ignore
-		LogFile:  "/var/log/tokopedia/bigquery-cluster/bigquery-cluster.error-fatal.log",
+		LogFile:  fatalLogFile,
 		Caller:   true,
 		UseColor: true,
 		UseJSON:  true,
@@ -140,7 +184,7 @@ func initiateLog() {
 	errorLogger, err := log.NewLogger(log.Zerolog, &logger.Config{
 		AppName:  "Simple App BigQuery Clustering",
 		Level:    log.ErrorLevel, // please ignore
-		LogFile:  "/var/log/tokopedia/bigquery-cluster/bigquery-cluster.error.log",
+		LogFile:  errorLogFile,
 		Caller:   true,
 		UseColor: true,
 		UseJSON:  true,
@@ -167,7 +211,7 @@ func initiateLog() {
 	infoLogger, err := log.NewLogger(log.Zerolog, &logger.Config{
 		AppName:  "Simple App BigQuery Clustering",
 		Level:    log.InfoLevel, // please ignore
-		LogFile:  "/var/log/tokopedia/bigquery-cluster/bigquery-cluster.info.log",
+		LogFile:  infoLogFile,
 		Caller:   true,
 		UseColor: true,
 		UseJSON:  true,
@@ -188,18 +232,13 @@ func initiateLog() {
 	})
 }
 
-func getConfigFile(config *GoogleOAuth) error {
+func getConfigFile(config *GoogleOAuth, clusterEnv string) error {
 
 	rootpath, _ := os.Getwd()
 
-	clusterEnv := os.Getenv(CLUSTER_ENV)
-	if clusterEnv == "" {
-		clusterEnv = "staging"
-	}
-
 	fmt.Println("Cluster Environment:", clusterEnv)
-	filepath := rootpath + credentialPath
-	filepath = filepath + PrefixFileSA + "." + clusterEnv + ".json"
+	filepath := rootpath + constant.CredentialPath
+	filepath = filepath + constant.PrefixFileSA + "." + clusterEnv + ".json"
 
 	fileStream, err := os.Open(filepath)
 	if err != nil {
@@ -220,4 +259,13 @@ func getConfigFile(config *GoogleOAuth) error {
 	}
 
 	return nil
+}
+
+func getEnvironment() (clusterEnv string) {
+	clusterEnv = os.Getenv(constant.CLUSTER_ENV)
+	if clusterEnv == "" {
+		clusterEnv = constant.STAGING
+	}
+
+	return clusterEnv
 }
