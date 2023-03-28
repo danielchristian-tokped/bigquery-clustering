@@ -32,7 +32,7 @@ type GoogleOAuth struct {
 }
 
 var spreadsheetID = "1ROdcDV71who85wabn5fIV6K8ZjdinbhBOqyWzI25GjI"
-var sheetrange = "B14:H28"
+var sheetrange = "B29:H29"
 
 var MapTableIDCluster = map[string][]string{}
 var ProjectIDCache = map[string]*bigquery.Client{}
@@ -119,8 +119,11 @@ func main() {
 
 		timeStart := time.Now()
 
+		var errMessage string
 		err = BQModule.CreateTableClustered(ctx, datasetID, tableID, clusterColumn)
 		if err != nil {
+			errMessage = err.Error()
+
 			fmt.Printf("Create Table Clustered Error on %s.%s.%s:\n%#v\n", projectID, datasetID, tableID, err)
 			log.Errorf("Create Table Clustered Error on %s.%s.%s:\n%#v\n", projectID, datasetID, tableID, err)
 		} else {
@@ -133,7 +136,7 @@ func main() {
 
 		currentRow := strconv.Itoa(startRow + identifier)
 
-		_, err := SheetModule.UpdateCellValue(ctx, spreadsheetID, currentRow, err.Error())
+		_, err := SheetModule.UpdateCellValue(ctx, spreadsheetID, currentRow, errMessage)
 		if err != nil {
 			fmt.Printf("Error Updating on row %s:\n%#v\n", currentRow, err)
 			log.Errorf("Error Updating on row %s:\n%#v\n", currentRow, err)
